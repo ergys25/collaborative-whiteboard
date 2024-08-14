@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Whiteboard</title>
+    <style>
+        body {
+            background-color: #202124;
+            color: #e8eaed;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            user-select: none;
+            overflow: hidden;
+        }
+
+        #toolbar {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            background-color: #333;
+            border-bottom: 2px solid #444;
+        }
+
+        #toolbar div {
+            display: flex;
+            align-items: center;
+        }
+
+        #colorPicker,
+        #brushSize,
+        #shapeSelector {
+            padding: 5px;
+            margin-right: 10px;
+            border-radius: 4px;
+            border: 1px solid #e8eaed;
+            background-color: #444;
+            color: #e8eaed;
+        }
+
+        button {
+            background-color: #4285f4;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: background-color 0.3s;
+            margin-left: 10px;
+        }
+
+        button:hover {
+            background-color: #357ae8;
+        }
+
+        #whiteboard {
+            flex-grow: 1;
+            display: block;
+            width: 100%;
+            height: calc(100vh - 60px); /* Adjust height based on toolbar height */
+            border: none;
+            cursor: crosshair;
+            background-color: #2b2b2b;
+            border-radius: 0 0 8px 8px;
+        }
+
+        #controls {
+            display: flex;
+            align-items: center;
+        }
+
+        #clearCanvas {
+            background-color: #e53935;
+        }
+
+        #clearCanvas:hover {
+            background-color: #d32f2f;
+        }
+
+        #eraser {
+            background-color: #f4b400;
+        }
+
+        #eraser:hover {
+            background-color: #f39c12;
+        }
+    </style>
+</head>
+
+<body>
+<div id="toolbar">
+    <div id="controls">
+        <label for="colorPicker">Color:</label>
+        <input type="color" id="colorPicker" value="#FFD700">
+
+        <label for="brushSize">Brush Size:</label>
+        <input type="range" id="brushSize" min="1" max="20" value="5">
+
+        <label for="shapeSelector">Shape:</label>
+        <select id="shapeSelector">
+            <option value="freehand">Freehand</option>
+            <option value="line">Line</option>
+            <option value="rectangle">Rectangle</option>
+            <option value="circle">Circle</option>
+        </select>
+
+        <button id="eraser">Eraser</button>
+        <button id="clearCanvas">Clear Canvas</button>
+    </div>
+</div>
+<canvas id="whiteboard"></canvas>
+
+<!-- Include SockJS and Stomp.js -->
+<script src="https://cdn.jsdelivr.net/npm/sockjs-client@1.5.1/dist/sockjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+
+<script>
+    const canvas = document.getElementById('whiteboard');
+    const context = canvas.getContext('2d');
+    const colorPicker = document.getElementById('colorPicker');
+    const brushSize = document.getElementById('brushSize');
+    const clearCanvasButton = document.getElementById('clearCanvas');
+    const shapeSelector = document.getElementById('shapeSelector');
+    const eraserButton = document.getElementById('eraser');
+
+    let drawing = false;
+    let erasing = false;
+    let lastX = 0;
+    let lastY = 0;
+    let currentShape = 'freehand';
+    let startX, startY;
+
+    let socket = new SockJS('/ws');
+    let stompClient = Stomp.over(socket);
+
+    stompClient.connect({}, function (frame) {
+        console.log('Connected: ' + frame);
+        stompClient.subscribe('/topic/points', function (messageOutput) {
+            const point = JSON.parse(messageOutput.body);
+            drawPoint(point.x, point.y, point.color, point.thickness, point.shape, false);
+        });
+
+        stompClient.subscribe('/topic/drawings', function (messageOutput) {
+            const drawing = JSON.parse(messageOutput.body);
+            drawPoint(drawing.x, drawing.y, drawing.color, drawing.thickness, drawing.shape, false);
+        });
+    });
+
+    canvas.addEventListener('mousedown', startDrawing);
+    canvas.addEventListener('mouseup', stopDrawing);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseleave', stopDrawing); // Stop drawing if mouse leaves canvas
+    clearCanvasButton.addEventListener('click', clearCanvas);
+    shapeSelector.addEventListener('change', (e) => currentShape = e.target.value);
+    eraserButton.addEventListener('click', () => {
+        erasing = !erasing;
+        eraserButton.style.backgroundColor = erasing ? '#f39c12' : '#f4b400';
+    });
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function startDrawing(e) {
+        drawing = true;
+        const rect = canvas.getBoundingClientRect();
+        lastX = e.clientX - rect.left;
+        lastY = e.clientY - rect.top;
+        startX = lastX;
+        startY = lastY;
+        context.beginPath();
+    }
+
+    function stopDrawing() {
+        if (drawing) {
+            drawing = false;
+            stompClient.send("/app/point", {}, JSON.stringify({ type: 'stop' }));
+        }
+    }
+
+    function draw(e) {
+        if (!drawing) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        const point = {
+            x: x,
+            y: y,
+            color: erasing ? '#2b2b2b' : colorPicker.value,
+            thickness: brushSize.value,
+            shape: currentShape,
+            type: 'draw'
+        };
+
+        stompClient.send("/app/point", {}, JSON.stringify(point));
+        drawPoint(x, y, point.color, point.thickness, point.shape, true);
+
+        lastX = x;
+        lastY = y;
+    }
+
+    function drawPoint(x, y, color, thickness, shape, isLocal) {
+        context.lineWidth = thickness;
+        context.lineCap = 'round';
+        context.strokeStyle = color;
+        context.fillStyle = color;
+
+        switch (shape) {
+            case 'freehand':
+                context.lineTo(x, y);
+                context.stroke();
+                if (isLocal) {
+                    context.beginPath();
+                    context.moveTo(x, y);
+                }
+                break;
+            case 'line':
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.moveTo(startX, startY);
+                context.lineTo(x, y);
+                context.stroke();
+                if (!isLocal) context.beginPath();
+                break;
+            case 'rectangle':
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.strokeRect(startX, startY, x - startX, y - startY);
+                if (!isLocal) context.beginPath();
+                break;
+            case 'circle':
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.beginPath();
+                let radius = Math.sqrt(Math.pow(x - startX, 2) + Math.pow(y - startY, 2));
+                context.arc(startX, startY, radius, 0, 2 * Math.PI);
+                context.stroke();
+                if (!isLocal) context.beginPath();
+                break;
+        }
+    }
+
+    function clearCanvas() {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        stompClient.send("/app/clear", {}, JSON.stringify({ type: 'clear' }));
+    }
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight - document.getElementById('toolbar').offsetHeight;
+        context.lineWidth = brushSize.value;
+    }
+</script>
+</body>
+</html>
